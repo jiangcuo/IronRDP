@@ -188,7 +188,7 @@ async fn connect(
     cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
-    let dest = format!("{}:{}", config.destination.name(), config.destination.port());
+    let dest = config.destination.to_string();
 
     let (client_addr, stream) = if let Some(ref gw_config) = config.gw {
         let (gw, client_addr) = ironrdp_mstsgu::GwClient::connect(gw_config, &config.connector.client_name)
@@ -288,7 +288,7 @@ async fn connect(
         &mut ReqwestNetworkClient::new(),
         (&config.destination).into(),
         server_public_key.to_owned(),
-        None,
+        config.kerberos_config.clone(),
     )
     .await?;
 
@@ -387,7 +387,7 @@ async fn connect_ws(
         connector.attach_static_channel(cliprdr);
     }
 
-    let destination = format!("{}:{}", config.destination.name(), config.destination.port());
+    let destination = config.destination.to_string();
 
     let (upgraded, server_public_key) = connect_rdcleanpath(
         &mut framed,
@@ -405,7 +405,7 @@ async fn connect_ws(
         &mut ReqwestNetworkClient::new(),
         (&config.destination).into(),
         server_public_key,
-        None,
+        config.kerberos_config.clone(),
     )
     .await?;
 
@@ -584,6 +584,9 @@ async fn active_session(
 
     let mut active_stage = ActiveStage::new(connection_result);
 
+    // Timer interval for driving clipboard lock timeouts (5 second interval)
+    let mut cleanup_interval = tokio::time::interval(core::time::Duration::from_secs(5));
+
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
             frame = reader.read_pdu() => {
@@ -623,7 +626,7 @@ async fn active_session(
                         active_stage.graceful_shutdown()?
                     }
                     RdpInputEvent::Clipboard(event) => {
-                        if let Some(cliprdr) = active_stage.get_svc_processor::<cliprdr::CliprdrClient>() {
+                        if let Some(cliprdr) = active_stage.get_svc_processor_mut::<cliprdr::CliprdrClient>() {
                             if let Some(svc_messages) = match event {
                                 ClipboardMessage::SendInitiateCopy(formats) => {
                                     Some(cliprdr.initiate_copy(&formats)
@@ -635,14 +638,6 @@ async fn active_session(
                                 }
                                 ClipboardMessage::SendInitiatePaste(format) => {
                                     Some(cliprdr.initiate_paste(format)
-                                        .map_err(|e| session::custom_err!("CLIPRDR", e))?)
-                                }
-                                ClipboardMessage::SendLockClipboard { clip_data_id } => {
-                                    Some(cliprdr.lock_clipboard(clip_data_id)
-                                        .map_err(|e| session::custom_err!("CLIPRDR", e))?)
-                                }
-                                ClipboardMessage::SendUnlockClipboard { clip_data_id } => {
-                                    Some(cliprdr.unlock_clipboard(clip_data_id)
                                         .map_err(|e| session::custom_err!("CLIPRDR", e))?)
                                 }
                                 ClipboardMessage::SendFileContentsRequest(request) => {
@@ -676,6 +671,27 @@ async fn active_session(
                         let frame = active_stage.encode_dvc_messages(messages)?;
                         vec![ActiveStageOutput::ResponseFrame(frame)]
                     }
+                }
+            }
+            _ = cleanup_interval.tick() => {
+                // Drive clipboard lock timeout cleanup
+                if let Some(cliprdr) = active_stage.get_svc_processor_mut::<cliprdr::CliprdrClient>() {
+                    match cliprdr.drive_timeouts() {
+                        Ok(svc_messages) => {
+                            let frame = active_stage.process_svc_processor_messages(svc_messages)?;
+                            if !frame.is_empty() {
+                                vec![ActiveStageOutput::ResponseFrame(frame)]
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Clipboard timeout cleanup failed");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
                 }
             }
         };
