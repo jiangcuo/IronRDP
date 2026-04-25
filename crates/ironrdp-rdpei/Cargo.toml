@@ -1,0 +1,27 @@
+[package]
+name = "ironrdp-rdpei"
+version = "0.1.0"
+readme = "README.md"
+description = "Remote Desktop Protocol Input Virtual Channel Extension implementation"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+ironrdp-core = { path = "../ironrdp-core", version = "0.1" } # public
+ironrdp-dvc = { path = "../ironrdp-dvc", version = "0.5" } # public
+ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.7" } # public
+ironrdp-svc = { path = "../ironrdp-svc", version = "0.6" } # public
+tracing = { version = "0.1", features = ["log"] }
+
+[lints]
+workspace = true
