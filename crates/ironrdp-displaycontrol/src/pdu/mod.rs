@@ -269,11 +269,31 @@ impl DisplayControlMonitorLayout {
         scale_factor: Option<u32>,
         physical_dims: Option<(u32, u32)>,
     ) -> EncodeResult<Self> {
-        let entry = MonitorLayoutEntry::new_primary(width, height)?.with_orientation(if width > height {
-            MonitorOrientation::Landscape
-        } else {
-            MonitorOrientation::Portrait
-        });
+        Self::new_single_primary_monitor_with_orientation(
+            width,
+            height,
+            if width > height {
+                MonitorOrientation::Landscape
+            } else {
+                MonitorOrientation::Portrait
+            },
+            scale_factor,
+            physical_dims,
+        )
+    }
+
+    /// Creates a new [`DisplayControlMonitorLayout`] with a single primary monitor
+    /// and an explicit monitor orientation.
+    ///
+    /// Per [2.2.2.2.1], orientation must be one of 0, 90, 180, or 270 degrees.
+    pub fn new_single_primary_monitor_with_orientation(
+        width: u32,
+        height: u32,
+        orientation: MonitorOrientation,
+        scale_factor: Option<u32>,
+        physical_dims: Option<(u32, u32)>,
+    ) -> EncodeResult<Self> {
+        let entry = MonitorLayoutEntry::new_primary(width, height)?.with_orientation(orientation);
 
         let entry = if let Some(scale_factor) = scale_factor {
             entry

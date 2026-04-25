@@ -5,7 +5,7 @@ use ironrdp_svc::{ChannelFlags, SvcMessage};
 use tracing::debug;
 
 use crate::CHANNEL_NAME;
-use crate::pdu::{DisplayControlCapabilities, DisplayControlMonitorLayout, DisplayControlPdu};
+use crate::pdu::{DisplayControlCapabilities, DisplayControlMonitorLayout, DisplayControlPdu, MonitorOrientation};
 
 /// A client for the Display Control Virtual Channel.
 pub struct DisplayControlClient {
@@ -59,6 +59,33 @@ impl DisplayControlClient {
         // TODO: prevent resolution with values greater than max monitor area received in caps.
         let pdu: DisplayControlPdu =
             DisplayControlMonitorLayout::new_single_primary_monitor(width, height, scale_factor, physical_dims)?.into();
+        debug!(?pdu, "Sending monitor layout");
+        encode_dvc_messages(channel_id, vec![Box::new(pdu)], ChannelFlags::empty())
+    }
+
+    /// Builds a [`DisplayControlPdu::MonitorLayout`] with a single primary monitor
+    /// and an explicit monitor orientation.
+    ///
+    /// This is useful for mobile and tablet clients where portrait, portrait-flipped,
+    /// and landscape-flipped layouts must be distinguished explicitly instead of inferred
+    /// from width and height alone.
+    pub fn encode_single_primary_monitor_with_orientation(
+        &self,
+        channel_id: u32,
+        width: u32,
+        height: u32,
+        orientation: MonitorOrientation,
+        scale_factor: Option<u32>,
+        physical_dims: Option<(u32, u32)>,
+    ) -> EncodeResult<Vec<SvcMessage>> {
+        let pdu: DisplayControlPdu = DisplayControlMonitorLayout::new_single_primary_monitor_with_orientation(
+            width,
+            height,
+            orientation,
+            scale_factor,
+            physical_dims,
+        )?
+        .into();
         debug!(?pdu, "Sending monitor layout");
         encode_dvc_messages(channel_id, vec![Box::new(pdu)], ChannelFlags::empty())
     }
