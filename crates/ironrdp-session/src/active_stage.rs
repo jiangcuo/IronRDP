@@ -421,6 +421,16 @@ impl ActiveStage {
         Ok(Vec::new())
     }
 
+    /// Encodes the user-requested MCS disconnection. Send before closing the transport.
+    pub fn disconnect_ultimatum(&self) -> SessionResult<Vec<ActiveStageOutput>> {
+        let ultimatum = mcs::McsMessage::DisconnectProviderUltimatum(
+            mcs::DisconnectProviderUltimatum::from_reason(mcs::DisconnectReason::UserRequested),
+        );
+        let frame = ironrdp_core::encode_vec(&ironrdp_pdu::x224::X224(ultimatum))
+            .map_err(SessionError::encode)?;
+        Ok(vec![ActiveStageOutput::ResponseFrame(frame)])
+    }
+
     /// Send a pdu on the static global channel. Typically used to send input events
     pub fn encode_static(&self, output: &mut WriteBuf, pdu: ShareDataPdu) -> SessionResult<usize> {
         self.x224_processor.encode_static(output, pdu)

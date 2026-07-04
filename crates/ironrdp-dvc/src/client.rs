@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::TypeId;
 use core::fmt;
@@ -297,6 +298,20 @@ impl DrdynvcClient {
             .get_by_channel_id_mut(channel_id)
             .and_then(|dvc| dvc.channel_processor.as_any_mut().downcast_mut())
             .map(|p| DynamicChannelMut::new(channel_id, p))
+    }
+
+    /// Returns lightweight DRDYNVC state useful for session-level diagnostics.
+    ///
+    /// The tuple contains:
+    /// - whether the DRDYNVC capability handshake completed;
+    /// - currently active dynamic virtual channel names;
+    /// - registered listener names.
+    pub fn diagnostic_info(&self) -> (bool, Vec<String>, Vec<String>) {
+        (
+            self.cap_handshake_done,
+            self.dynamic_channels.active_channel_names().collect(),
+            self.dynamic_channels.listener_names().collect(),
+        )
     }
 
     fn create_capabilities_response(&mut self, server_version: CapsVersion) -> SvcMessage {
@@ -640,6 +655,16 @@ impl DynamicChannelSet {
     #[inline]
     fn values(&self) -> impl Iterator<Item = &DynamicVirtualChannel> {
         self.active_channels.values()
+    }
+
+    fn active_channel_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.active_channels
+            .values()
+            .map(|channel| channel.channel_name().to_owned())
+    }
+
+    fn listener_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.listeners.keys().cloned()
     }
 }
 impl SvcClientProcessor for DrdynvcClient {}
