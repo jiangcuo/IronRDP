@@ -182,14 +182,8 @@ impl Processor {
                         // session shutdown.
                         //
                         // [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/27915739-8f77-487e-9927-55008af7fd68
-                        let ultimatum = McsMessage::DisconnectProviderUltimatum(
-                            DisconnectProviderUltimatum::from_reason(DisconnectReason::UserRequested),
-                        );
-
-                        let encoded_pdu = ironrdp_core::encode_vec(&X224(ultimatum)).map_err(SessionError::encode);
-
                         Ok(vec![
-                            ProcessorOutput::ResponseFrame(encoded_pdu?),
+                            ProcessorOutput::ResponseFrame(encode_disconnect_provider_ultimatum()?),
                             ProcessorOutput::Disconnect(DisconnectDescription::McsDisconnect(
                                 DisconnectReason::UserRequested,
                             )),
@@ -261,6 +255,14 @@ impl Processor {
         .map_err(crate::legacy::map_error)?;
         Ok(written)
     }
+}
+
+pub(crate) fn encode_disconnect_provider_ultimatum() -> SessionResult<Vec<u8>> {
+    let ultimatum = McsMessage::DisconnectProviderUltimatum(DisconnectProviderUltimatum::from_reason(
+        DisconnectReason::UserRequested,
+    ));
+
+    ironrdp_core::encode_vec(&X224(ultimatum)).map_err(SessionError::encode)
 }
 
 /// Processes a vector of [`SvcMessage`] in preparation for sending them to the server on the `channel_id` channel.

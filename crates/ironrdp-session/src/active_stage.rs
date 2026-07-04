@@ -224,6 +224,21 @@ impl ActiveStage {
         Ok(vec![ActiveStageOutput::ResponseFrame(frame.into_inner())])
     }
 
+    /// Encodes a client-side MCS Disconnect Provider Ultimatum.
+    ///
+    /// This is the direct user-initiated disconnection path used by mstsc-style clients.
+    /// It sends `rn-user-requested` at the MCS layer; the caller should send the returned
+    /// frame and then close the transport.
+    ///
+    /// Client disconnection is defined in [\[MS-RDPBCGR\] 1.3.1.4.1].
+    ///
+    /// [\[MS-RDPBCGR\] 1.3.1.4.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/27915739-8f77-487e-9927-55008af7fd68
+    pub fn disconnect_ultimatum(&self) -> SessionResult<Vec<ActiveStageOutput>> {
+        Ok(vec![ActiveStageOutput::ResponseFrame(
+            x224::encode_disconnect_provider_ultimatum()?,
+        )])
+    }
+
     /// Send a pdu on the static global channel. Typically used to send input events
     pub fn encode_static(&self, output: &mut WriteBuf, pdu: ShareDataPdu) -> SessionResult<usize> {
         self.x224_processor.encode_static(output, pdu)
@@ -434,4 +449,23 @@ fn process_slow_path_pointer(
     let mut src = ReadCursor::new(data);
     let pointer = slow_path::decode_slow_path_pointer(&mut src).map_err(SessionError::decode)?;
     fast_path_processor.process_pointer_update(image, pointer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_ultimatum_encodes_user_requested_mcs_frame() {
+        let frame = x224::encode_disconnect_provider_ultimatum().unwrap();
+
+        assert_eq!(
+            frame,
+            [
+                0x03, 0x00, 0x00, 0x09, // TPKT
+                0x02, 0xf0, 0x80, // X.224 Data TPDU
+                0x21, 0x80, // MCS DisconnectProviderUltimatum rn-user-requested
+            ],
+        );
+    }
 }
