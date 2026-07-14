@@ -89,6 +89,7 @@ struct SessionBuilderInner {
 
     use_display_control: bool,
     enable_credssp: bool,
+    proxy_completed_credssp: bool,
     outbound_message_size_limit: Option<usize>,
 }
 
@@ -129,6 +130,7 @@ impl Default for SessionBuilderInner {
 
             use_display_control: false,
             enable_credssp: true,
+            proxy_completed_credssp: false,
             outbound_message_size_limit: None,
         }
     }
@@ -246,6 +248,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             |kdc_proxy_url: String| { self.0.borrow_mut().kdc_proxy_url = Some(kdc_proxy_url) };
             |display_control: bool| { self.0.borrow_mut().use_display_control = display_control };
             |enable_credssp: bool| { self.0.borrow_mut().enable_credssp = enable_credssp };
+            |proxy_completed_credssp: bool| { self.0.borrow_mut().proxy_completed_credssp = proxy_completed_credssp };
             |outbound_message_size_limit: f64| {
                 let limit = if outbound_message_size_limit >= 0.0 && outbound_message_size_limit <= f64::from(u32::MAX) {
                     #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -319,6 +322,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
     }
 
     async fn connect(&self) -> Result<Self::Session, Self::Error> {
+        let proxy_completed_credssp = self.0.borrow().proxy_completed_credssp;
         let (
             username,
             destination,
@@ -352,10 +356,18 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         {
             let inner = self.0.borrow();
 
-            username = inner.username.clone().context("username missing")?;
+            username = if proxy_completed_credssp {
+                inner.username.clone().unwrap_or_default()
+            } else {
+                inner.username.clone().context("username missing")?
+            };
             destination = inner.destination.clone().context("destination missing")?;
             server_domain = inner.server_domain.clone();
-            password = inner.password.clone().context("password missing")?;
+            password = if proxy_completed_credssp {
+                inner.password.clone().unwrap_or_default()
+            } else {
+                inner.password.clone().context("password missing")?
+            };
             proxy_address = inner.proxy_address.clone().context("proxy_address missing")?;
             auth_token = inner.auth_token.clone().context("auth_token missing")?;
             pcb = inner.pcb.clone();
@@ -394,7 +406,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         let mut config = build_config(username, password, server_domain, client_name.clone(), desktop_size);
 
         let enable_credssp = self.0.borrow().enable_credssp;
-        config.enable_credssp = enable_credssp;
+        config.enable_credssp = enable_credssp || proxy_completed_credssp;
 
         let (input_events_tx, input_events_rx) = mpsc::unbounded();
 
@@ -480,6 +492,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             printer_driver_name,
             computer_name: client_name.clone(),
             use_display_control,
+            proxy_completed_credssp,
         })
         .await?;
 
@@ -1490,6 +1503,8 @@ struct ConnectParams {
     /// `computer_name` when constructing the `Rdpdr` processor.
     computer_name: String,
     use_display_control: bool,
+    /// Indicates that the WebSocket proxy already authenticated this RDP connection with CredSSP.
+    proxy_completed_credssp: bool,
 }
 
 fn default_printer_driver_name() -> String {
@@ -1539,6 +1554,7 @@ async fn connect(
         printer_driver_name,
         computer_name,
         use_display_control,
+        proxy_completed_credssp,
     }: ConnectParams,
 ) -> Result<(connector::ConnectionResult, WebSocket), IronError> {
     let mut framed = ironrdp_futures::LocalFuturesFramed::new(ws);
@@ -1547,6 +1563,12 @@ async fn connect(
     let dummy_client_addr = core::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 33899));
 
     let mut connector = ClientConnector::new(config, dummy_client_addr);
+
+    if proxy_completed_credssp {
+        connector = connector.with_requested_protocols(
+            ironrdp::pdu::nego::SecurityProtocol::HYBRID | ironrdp::pdu::nego::SecurityProtocol::SSL,
+        );
+    }
 
     if let Some(clipboard_backend) = clipboard_backend {
         connector.attach_static_channel(CliprdrClient::new(Box::new(clipboard_backend)));
@@ -1574,6 +1596,13 @@ async fn connect(
 
     let (upgraded, server_public_key) =
         connect_rdcleanpath(&mut framed, &mut connector, destination.clone(), proxy_auth_token, pcb).await?;
+
+    if proxy_completed_credssp {
+        if !connector.should_perform_credssp() {
+            return Err(anyhow::anyhow!("proxy-completed CredSSP requires HYBRID negotiation").into());
+        }
+        connector.mark_credssp_as_done();
+    }
 
     let connection_result = ironrdp_futures::connect_finalize(
         upgraded,

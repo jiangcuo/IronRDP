@@ -46,6 +46,11 @@ export function enableCredssp(enable: boolean): Extension {
     return new Extension('enable_credssp', enable);
 }
 
+/** Marks CredSSP as already completed by the authenticated transport proxy. */
+export function proxyCompletedCredssp(enable: boolean): Extension {
+    return new Extension('proxy_completed_credssp', enable);
+}
+
 // --- File transfer (RDP-specific) ---
 
 export { RdpFileTransferProvider } from './RdpFileTransferProvider';

@@ -123,6 +123,8 @@ impl State for ClientConnectorState {
 pub struct ClientConnector {
     pub config: Config,
     pub state: ClientConnectorState,
+    /// Optional protocol mask used when a transport proxy owns the security handshake.
+    requested_protocols: Option<nego::SecurityProtocol>,
     /// The client address to be used in the Client Info PDU.
     pub client_addr: SocketAddr,
     pub static_channels: StaticChannelSet,
@@ -133,9 +135,17 @@ impl ClientConnector {
         Self {
             config,
             state: ClientConnectorState::ConnectionInitiationSendRequest,
+            requested_protocols: None,
             client_addr,
             static_channels: StaticChannelSet::new(),
         }
+    }
+
+    /// Overrides the protocol mask advertised in the X.224 connection request.
+    #[must_use]
+    pub fn with_requested_protocols(mut self, protocols: nego::SecurityProtocol) -> Self {
+        self.requested_protocols = Some(protocols);
+        self
     }
 
     #[must_use]
@@ -241,23 +251,25 @@ impl Sequence for ClientConnector {
             ClientConnectorState::ConnectionInitiationSendRequest => {
                 debug!("Connection Initiation");
 
-                let mut security_protocol = nego::SecurityProtocol::empty();
+                let mut security_protocol = self.requested_protocols.unwrap_or_else(nego::SecurityProtocol::empty);
 
-                if self.config.enable_tls {
-                    security_protocol.insert(nego::SecurityProtocol::SSL);
-                }
+                if self.requested_protocols.is_none() {
+                    if self.config.enable_tls {
+                        security_protocol.insert(nego::SecurityProtocol::SSL);
+                    }
 
-                if self.config.enable_credssp {
-                    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/902b090b-9cb3-4efc-92bf-ee13373371e3
-                    // The spec is stating that `PROTOCOL_SSL` "SHOULD" also be set when using `PROTOCOL_HYBRID`.
-                    // > PROTOCOL_HYBRID (0x00000002)
-                    // > Credential Security Support Provider protocol (CredSSP) (section 5.4.5.2).
-                    // > If this flag is set, then the PROTOCOL_SSL (0x00000001) flag SHOULD also be set
-                    // > because Transport Layer Security (TLS) is a subset of CredSSP.
-                    // However, crucially, it’s not strictly required (not "MUST").
-                    // In fact, we purposefully choose to not set `PROTOCOL_SSL` unless `enable_winlogon` is `true`.
-                    // This tells the server that we are not going to accept downgrading NLA to TLS security.
-                    security_protocol.insert(nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX);
+                    if self.config.enable_credssp {
+                        // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/902b090b-9cb3-4efc-92bf-ee13373371e3
+                        // The spec is stating that `PROTOCOL_SSL` "SHOULD" also be set when using `PROTOCOL_HYBRID`.
+                        // > PROTOCOL_HYBRID (0x00000002)
+                        // > Credential Security Support Provider protocol (CredSSP) (section 5.4.5.2).
+                        // > If this flag is set, then the PROTOCOL_SSL (0x00000001) flag SHOULD also be set
+                        // > because Transport Layer Security (TLS) is a subset of CredSSP.
+                        // However, crucially, it’s not strictly required (not "MUST").
+                        // In fact, we purposefully choose to not set `PROTOCOL_SSL` unless `enable_winlogon` is `true`.
+                        // This tells the server that we are not going to accept downgrading NLA to TLS security.
+                        security_protocol.insert(nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX);
+                    }
                 }
 
                 if security_protocol.is_standard_rdp_security() {
