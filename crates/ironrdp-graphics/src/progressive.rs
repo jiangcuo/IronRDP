@@ -1265,6 +1265,18 @@ struct ProgressiveContext {
     surface: SurfaceTiles,
 }
 
+/// Metadata from the most recent payload, including the prefix processed
+/// before a decode failure. Contains no compressed or decoded desktop pixels.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProgressiveDecodeStats {
+    pub context_flags: Option<u8>,
+    pub reduce_extrapolate_regions: usize,
+    pub symmetric_regions: usize,
+    pub simple_tiles: usize,
+    pub first_tiles: usize,
+    pub upgrade_tiles: usize,
+}
+
 /// High-level progressive bitmap decoder for EGFX WireToSurface2 processing.
 ///
 /// Maintains per-context progressive state and surface-scoped sub-band
@@ -1301,6 +1313,7 @@ pub struct ProgressiveDecoder {
     frame_tiles: BTreeMap<(u16, u32), BTreeSet<(u16, u16)>>,
     frame_active: bool,
     surface_context_flags: BTreeMap<u16, bool>,
+    last_decode_stats: ProgressiveDecodeStats,
 }
 
 impl ProgressiveDecoder {
@@ -1312,7 +1325,13 @@ impl ProgressiveDecoder {
             frame_tiles: BTreeMap::new(),
             frame_active: false,
             surface_context_flags: BTreeMap::new(),
+            last_decode_stats: ProgressiveDecodeStats::default(),
         }
+    }
+
+    /// Metadata for the last payload, retained on success and failure.
+    pub fn last_decode_stats(&self) -> ProgressiveDecodeStats {
+        self.last_decode_stats
     }
 
     /// Start an RDPGFX frame, resetting the set of tiles available to REGION blocks.
@@ -1348,7 +1367,12 @@ impl ProgressiveDecoder {
     ) -> Result<Vec<DecodedTile>, ProgressiveDecodeError> {
         use ironrdp_pdu::codecs::rfx::progressive::{ProgressiveBlock, decode_progressive_stream};
 
+        self.last_decode_stats = ProgressiveDecodeStats::default();
         let blocks = decode_progressive_stream(bitmap_data)?;
+        self.last_decode_stats.context_flags = blocks.iter().find_map(|block| match block {
+            ProgressiveBlock::Context(ctx) => Some(ctx.flags),
+            _ => None,
+        });
 
         // Extract the band-layout flag from the CONTEXT block when present.
         // Per MS-RDPEGFX 2.2.4.2 the SYNC + CONTEXT blocks establish a codec
@@ -1437,8 +1461,18 @@ impl ProgressiveDecoder {
                 _ => continue,
             };
 
+            if region.uses_reduce_extrapolate() {
+                self.last_decode_stats.reduce_extrapolate_regions += 1;
+            } else {
+                self.last_decode_stats.symmetric_regions += 1;
+            }
             let mut region_tiles = BTreeMap::new();
             for tile_block in &region.tiles {
+                match tile_block {
+                    ProgressiveTile::Simple(_) => self.last_decode_stats.simple_tiles += 1,
+                    ProgressiveTile::First(_) => self.last_decode_stats.first_tiles += 1,
+                    ProgressiveTile::Upgrade(_) => self.last_decode_stats.upgrade_tiles += 1,
+                }
                 let tiles = decode_tile_block(
                     surface_id,
                     &mut context.surface,

@@ -875,10 +875,12 @@ impl GraphicsPipelineClient {
                 &pdu.bitmap_data,
             )
             .map_err(|error| {
-                warn!(?error, "rfx progressive decode failed");
+                warn!(?error, stats = ?self.progressive_decoder.last_decode_stats(), "rfx progressive decode failed");
                 pdu_other_err!("rfx progressive decode failed", source: error)
             })?;
 
+        debug!(surface_id = pdu.surface_id, context_id = pdu.codec_context_id, bytes = pdu.bitmap_data.len(),
+            stats = ?self.progressive_decoder.last_decode_stats(), "Progressive payload decoded");
         let tile_count = tiles.len();
         for tile in tiles {
             let tile_left = tile.x_idx.saturating_mul(TILE_DIM);
