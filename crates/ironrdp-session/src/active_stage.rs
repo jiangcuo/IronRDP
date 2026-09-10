@@ -47,6 +47,7 @@ pub struct ActiveStage {
     bulk_decompressor: Option<BulkCompressor>,
     enable_server_pointer: bool,
     window_support_level: Option<WindowSupportLevel>,
+    graphics_output_generation: u64,
 }
 
 /// Builder for [`ActiveStage`].
@@ -103,6 +104,7 @@ impl ActiveStageBuilder {
             bulk_decompressor: new_bulk_decompressor(compression_type),
             enable_server_pointer,
             window_support_level: None,
+            graphics_output_generation: 0,
         }
     }
 }
@@ -223,6 +225,20 @@ impl ActiveStage {
                 // data only ever arrives over a DVC, which is X224-carried, so this stays
                 // out of the Action::FastPath arm rather than running on every fast-path
                 // frame (the highest-frequency path in a session).
+                let output_state = self.get_dvc::<GraphicsPipelineClient>()
+                    .map(|gfx| gfx.processor().output_state());
+                if let Some((generation, width, height)) = output_state {
+                    if generation != self.graphics_output_generation {
+                        if width == 0 || height == 0 || width > 8192 || height > 8192 {
+                            return Err(SessionError::general("Invalid EGFX output dimensions"));
+                        }
+                        *image = DecodedImage::new(image.pixel_format(), width, height);
+                        self.graphics_output_generation = generation;
+                        stage_outputs.push(ActiveStageOutput::GraphicsUpdate(InclusiveRectangle {
+                            left: 0, top: 0, right: width - 1, bottom: height - 1,
+                        }));
+                    }
+                }
                 let graphics_updates = self
                     .get_dvc_mut::<GraphicsPipelineClient>()
                     .map(|mut gfx| gfx.processor_mut().drain_output())
@@ -1028,6 +1044,19 @@ mod tests {
     use ironrdp_pdu::input::mouse::PointerFlags;
     use ironrdp_pdu::pointer::{ColorPointerAttribute, Point16, PointerAttribute, PointerUpdateData};
     use ironrdp_rdpei::pdu::{PenEventPdu, RdpInputProtocolVersion, RdpeiPdu, ScReadyPdu, TouchEventPdu};
+
+    #[test]
+    fn user_disconnect_preserves_mcs_wire_contract() {
+        let stage = ActiveStageBuilder {
+            static_channels: StaticChannelSet::new(),
+            user_channel_id: 1001, io_channel_id: 1003, message_channel_id: None,
+            share_id: 1, compression_type: None,
+            enable_server_pointer: true, pointer_software_rendering: false,
+        }.build();
+        let outputs = stage.disconnect_ultimatum().unwrap();
+        let ActiveStageOutput::ResponseFrame(frame) = &outputs[0] else { panic!("expected MCS frame") };
+        assert_eq!(frame, &[0x03, 0x00, 0x00, 0x09, 0x02, 0xf0, 0x80, 0x21, 0x80]);
+    }
 
     #[test]
     fn full_redraw_prefers_suppress_output_toggle_when_supported() {

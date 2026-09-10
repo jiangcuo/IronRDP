@@ -23,9 +23,8 @@ required-features = ["native-tls"]
 
 [features]
 default = [] # No default feature, the user must choose a TLS backend by enabling the appropriate feature.
-# The rustls backend. `rustls` keeps using the aws-lc-rs crypto provider (unchanged
-# default); the crypto provider is otherwise selectable so downstream crates are not
-# forced onto a specific one.
+# This fork preserves ring for the historical `rustls` feature. Explicit provider
+# features remain available to downstream consumers.
 rustls = ["rustls-ring"]
 rustls-aws-lc-rs = ["rustls-no-provider", "tokio-rustls/aws_lc_rs"]
 rustls-ring = ["rustls-no-provider", "tokio-rustls/ring"]

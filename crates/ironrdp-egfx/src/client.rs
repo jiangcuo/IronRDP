@@ -272,6 +272,10 @@ pub trait GraphicsPipelineHandler: Send {
     /// surface ID, destination rectangle, and RGBA pixel data.
     fn on_bitmap_updated(&mut self, _update: &BitmapUpdate) {}
 
+    /// A WireToSurface2 Progressive update was successfully decoded and applied.
+    /// Reports codec identity without retaining or copying pixel payloads.
+    fn on_progressive_decoded(&mut self, _surface_id: u16, _compressed_bytes: usize, _tiles: usize) {}
+
     /// Called when a logical frame is complete
     ///
     /// All bitmap updates between the corresponding `StartFrame`
@@ -451,7 +455,13 @@ impl GraphicsPipelineClient {
     // State Queries
     // ========================================================================
 
-    /// Check if the client has completed capability negotiation
+    /// Latest ResetGraphics generation and output dimensions. Generation zero means no reset received.
+    #[must_use]
+    pub fn output_state(&self) -> (u64, u16, u16) {
+        self.compositor.output_state()
+    }
+
+    /// Check if the client has completed capability negotiation.
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.state == ClientState::Active
@@ -853,6 +863,8 @@ impl GraphicsPipelineClient {
             .ok_or_else(|| pdu_other_err!("unknown surface in WireToSurface2"))?;
         let (surface_width, surface_height) = (surface.width, surface.height);
 
+        trace!(surface_id = pdu.surface_id, context_id = pdu.codec_context_id,
+            bytes = pdu.bitmap_data.len(), "Decoding RemoteFX Progressive update");
         let tiles = self
             .progressive_decoder
             .decode_bitmap(
@@ -867,6 +879,7 @@ impl GraphicsPipelineClient {
                 pdu_other_err!("rfx progressive decode failed")
             })?;
 
+        let tile_count = tiles.len();
         for tile in tiles {
             let tile_left = tile.x_idx.saturating_mul(TILE_DIM);
             let tile_top = tile.y_idx.saturating_mul(TILE_DIM);
@@ -930,6 +943,7 @@ impl GraphicsPipelineClient {
             }
         }
 
+        self.handler.on_progressive_decoded(pdu.surface_id, pdu.bitmap_data.len(), tile_count);
         Ok(())
     }
 

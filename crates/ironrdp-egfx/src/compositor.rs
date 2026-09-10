@@ -136,6 +136,7 @@ pub(crate) struct Compositor {
     /// against [`MAX_COMPOSITOR_BYTES`]. Kept as a running total rather than
     /// recomputed so the check before an allocation stays O(1).
     allocated_bytes: usize,
+    output_generation: u64,
     output_width: u16,
     output_height: u16,
     /// Regions dirtied by the frame currently being built (between
@@ -146,6 +147,10 @@ pub(crate) struct Compositor {
 }
 
 impl Compositor {
+    pub(crate) fn output_state(&self) -> (u64, u16, u16) {
+        (self.output_generation, self.output_width, self.output_height)
+    }
+
     /// Handle `ResetGraphics`: set the output size and drop all surfaces, cache and
     /// pending output.
     ///
@@ -157,6 +162,7 @@ impl Compositor {
     /// output, so painting them into the new one repaints stale pixels and, after a
     /// shrink, addresses a region the new output no longer contains.
     pub(crate) fn reset(&mut self, width: u32, height: u32) {
+        self.output_generation = self.output_generation.wrapping_add(1);
         self.output_width = u16::try_from(width).unwrap_or(u16::MAX);
         self.output_height = u16::try_from(height).unwrap_or(u16::MAX);
         self.surfaces.clear();
