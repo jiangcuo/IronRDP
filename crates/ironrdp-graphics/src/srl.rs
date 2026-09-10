@@ -13,7 +13,7 @@ const MAX_ZERO_RUN: usize = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrlError {
     /// The required trailing zero byte is absent.
-    MissingTerminator,
+    MissingTerminator { length: usize, last_byte: Option<u8> },
     /// The stream ended before a complete code word was read.
     Truncated,
     /// An SRL value requires between one and fifteen magnitude bits.
@@ -27,7 +27,7 @@ pub enum SrlError {
 impl core::fmt::Display for SrlError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::MissingTerminator => write!(f, "srl stream is missing its trailing zero byte"),
+            Self::MissingTerminator { length, last_byte } => write!(f, "srl stream is missing its trailing zero byte (length={length}, last_byte={last_byte:?})"),
             Self::Truncated => write!(f, "srl stream is truncated"),
             Self::InvalidBitCount(bits) => write!(f, "invalid srl magnitude bit count {bits}"),
             Self::MagnitudeOutOfRange { magnitude, max } => {
@@ -55,11 +55,11 @@ impl<'a> SrlDecoder<'a> {
     /// Create a decoder for an SRL stream, excluding its required trailing zero byte.
     pub fn new(data: &'a [u8]) -> Result<Self, SrlError> {
         let Some((&terminator, payload)) = data.split_last() else {
-            return Err(SrlError::MissingTerminator);
+            return Err(SrlError::MissingTerminator { length: data.len(), last_byte: data.last().copied() });
         };
 
         if terminator != 0 {
-            return Err(SrlError::MissingTerminator);
+            return Err(SrlError::MissingTerminator { length: data.len(), last_byte: data.last().copied() });
         }
 
         Ok(Self {
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_terminator() {
-        assert_eq!(decode_srl(&[0x84], 1, 4), Err(SrlError::MissingTerminator));
+        assert_eq!(decode_srl(&[0x84], 1, 4), Err(SrlError::MissingTerminator { length: 1, last_byte: Some(0x84) }));
     }
 
     #[test]
