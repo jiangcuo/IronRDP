@@ -42,7 +42,7 @@ use alloc::collections::btree_map::Entry;
 
 use ironrdp_core::invalid_field_err;
 use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
-use ironrdp_pdu::codecs::rfx::progressive::{ComponentCodecQuant, ProgressiveCodecQuant, TILE_FLAG_DIFFERENCE};
+use ironrdp_pdu::codecs::rfx::progressive::{ComponentCodecQuant, ProgressiveCodecQuant, ProgressiveTile, TILE_FLAG_DIFFERENCE};
 use ironrdp_pdu::geometry::{ExclusiveRectangle, InclusiveRectangle};
 
 use crate::dwt_extrapolate::BandInfo;
