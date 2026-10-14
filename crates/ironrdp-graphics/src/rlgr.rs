@@ -6,8 +6,6 @@ use bitvec::prelude::*;
 use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use yuv::YuvError;
 
-use crate::utils::Bits;
-
 const KP_MAX: u32 = 80;
 const LS_GR: u32 = 3;
 const UP_GR: u32 = 4;
@@ -15,23 +13,24 @@ const DN_GR: u32 = 6;
 const UQ_GR: u32 = 3;
 const DQ_GR: u32 = 3;
 
-macro_rules! write_byte {
-    ($output:ident, $value:ident) => {
-        if !$output.is_empty() {
-            $output[0] = $value;
-            $output = &mut $output[1..];
+/// Writes one decoded coefficient at `$written`, leaving the decoding loop when the output is full.
+macro_rules! write_coefficient {
+    ($output:ident, $written:ident, $value:ident) => {
+        if $written < $output.len() {
+            $output[$written] = $value;
+            $written += 1;
         } else {
             break;
         }
     };
 }
 
-macro_rules! try_split_bits {
+/// Reads `$n` bits (at most 32) from a [`BitReader`], leaving the decoding loop when fewer remain.
+macro_rules! try_read_bits {
     ($bits:ident, $n:expr) => {
-        if $bits.len() < $n {
-            break;
-        } else {
-            $bits.split_to($n)
+        match $bits.read($n) {
+            Some(value) => value,
+            None => break,
         }
     };
 }
@@ -252,7 +251,7 @@ fn code_gr(bits: &mut BitStream<'_>, krp: &mut u32, val: u32) {
     }
 }
 
-pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Result<(), RlgrError> {
+pub fn decode(mode: EntropyAlgorithm, tile: &[u8], output: &mut [i16]) -> Result<(), RlgrError> {
     #![expect(
         clippy::as_conversions,
         clippy::cast_possible_truncation,
@@ -268,21 +267,23 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
     let mut kp: u32 = k << LS_GR;
     let mut krp: u32 = kr << LS_GR;
 
-    let mut bits = Bits::new(BitSlice::from_slice(tile));
+    let mut bits = BitReader::new(tile);
+    // Next coefficient to write.
+    let mut written = 0;
 
-    while !bits.is_empty() && !output.is_empty() {
+    while !bits.is_empty() && written < output.len() {
         match CompressionMode::from(k) {
             CompressionMode::RunLength => {
-                let number_of_zeros = truncate_leading_value(&mut bits, false);
-                try_split_bits!(bits, 1);
-                let run = count_run(number_of_zeros, &mut k, &mut kp) + load_be_u32(try_split_bits!(bits, k as usize));
+                let number_of_zeros = bits.skip_leading(false);
+                try_read_bits!(bits, 1);
+                let run = count_run(number_of_zeros, &mut k, &mut kp) + try_read_bits!(bits, k as usize);
 
-                let sign_bit = try_split_bits!(bits, 1).load_be::<u8>();
+                let sign_bit = try_read_bits!(bits, 1) as u8;
 
-                let number_of_ones = truncate_leading_value(&mut bits, true);
-                try_split_bits!(bits, 1);
+                let number_of_ones = bits.skip_leading(true);
+                try_read_bits!(bits, 1);
 
-                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+                let code_remainder = try_read_bits!(bits, kr as usize) + ((number_of_ones as u32) << kr);
 
                 update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
                 kp = kp.saturating_sub(DN_GR);
@@ -290,29 +291,31 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
 
                 let magnitude = compute_rl_magnitude(sign_bit, code_remainder)?;
 
-                let size = min(run as usize, output.len());
-                fill(&mut output[..size], 0);
-                output = &mut output[size..];
-                write_byte!(output, magnitude);
+                let size = min(run as usize, output.len() - written);
+                output[written..written + size].fill(0);
+                written += size;
+                write_coefficient!(output, written, magnitude);
             }
             CompressionMode::GolombRice => {
-                let number_of_ones = truncate_leading_value(&mut bits, true);
-                try_split_bits!(bits, 1);
+                let number_of_ones = bits.skip_leading(true);
+                try_read_bits!(bits, 1);
 
-                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+                let code_remainder = try_read_bits!(bits, kr as usize) + ((number_of_ones as u32) << kr);
 
                 update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
 
                 match mode {
                     EntropyAlgorithm::Rlgr1 => {
                         let magnitude = compute_rlgr1_magnitude(code_remainder, &mut k, &mut kp)?;
-                        write_byte!(output, magnitude);
+                        write_coefficient!(output, written, magnitude);
                     }
                     EntropyAlgorithm::Rlgr3 => {
                         let n_index = compute_n_index(code_remainder);
 
-                        let val1 = load_be_u32(try_split_bits!(bits, n_index));
-                        let val2 = code_remainder - val1;
+                        let val1 = try_read_bits!(bits, n_index as usize);
+                        // Malformed streams can have `val1 > code_remainder`; the wrapped value is
+                        // rejected by `compute_rlgr3_magnitude` instead of panicking here.
+                        let val2 = code_remainder.wrapping_sub(val1);
                         if val1 != 0 && val2 != 0 {
                             kp = kp.saturating_sub(2 * DQ_GR);
                             k = kp >> LS_GR;
@@ -322,10 +325,10 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
                         }
 
                         let magnitude = compute_rlgr3_magnitude(val1)?;
-                        write_byte!(output, magnitude);
+                        write_coefficient!(output, written, magnitude);
 
                         let magnitude = compute_rlgr3_magnitude(val2)?;
-                        write_byte!(output, magnitude);
+                        write_coefficient!(output, written, magnitude);
                     }
                 }
             }
@@ -333,42 +336,124 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
     }
 
     // Fill remaining buffer with zeros.
-    fill(output, 0);
+    output[written..].fill(0);
 
     Ok(())
 }
 
-fn fill(buffer: &mut [i16], value: i16) {
-    for v in buffer {
-        *v = value;
+/// MSB-first bit reader over a byte slice for the RLGR decoder.
+///
+/// Upcoming bits are kept left-aligned in a 64-bit accumulator that is refilled eight bytes at a
+/// time, so reads are shifts and runs of equal bits are counted with one `leading_zeros` per
+/// refill instead of bit by bit. Bits past the end of the slice read as zero, but counts and reads
+/// never go beyond the real bits (`remaining`).
+struct BitReader<'a> {
+    data: &'a [u8],
+    /// Next byte of `data` to load into the accumulator (may pass the end: zero padding).
+    next_byte: usize,
+    /// Upcoming bits, most significant first.
+    acc: u64,
+    /// Number of loaded bits in `acc`.
+    acc_bits: u32,
+    /// Real bits left in the stream, including the ones in `acc`.
+    remaining: usize,
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "bit counts and shifts below 64 (u32/usize/u64 conversions), hot loop"
+)]
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            next_byte: 0,
+            acc: 0,
+            acc_bits: 0,
+            remaining: data.len() * 8,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining == 0
+    }
+
+    /// Tops the accumulator up to at least 56 loaded bits.
+    #[inline]
+    fn refill(&mut self) {
+        let word = match self.data.get(self.next_byte..self.next_byte + 8) {
+            Some(bytes) => u64::from_be_bytes(bytes.try_into().expect("eight bytes")),
+            None => {
+                let mut bytes = [0u8; 8];
+                let tail = self.data.get(self.next_byte..).unwrap_or_default();
+                let len = min(tail.len(), 8);
+                bytes[..len].copy_from_slice(&tail[..len]);
+                u64::from_be_bytes(bytes)
+            }
+        };
+        self.acc |= word >> self.acc_bits;
+        self.next_byte += ((63 - self.acc_bits) >> 3) as usize;
+        self.acc_bits |= 56;
+    }
+
+    #[inline]
+    fn consume(&mut self, count: u32) {
+        // `count` < 64: at most `acc_bits`, which is below 64.
+        self.acc <<= count;
+        self.acc_bits -= count;
+        self.remaining -= count as usize;
+    }
+
+    /// Consumes and counts the bits equal to `value` before the next different bit (or the end).
+    #[inline]
+    fn skip_leading(&mut self, value: bool) -> usize {
+        let mut total = 0;
+        loop {
+            if self.acc_bits < 56 {
+                self.refill();
+            }
+            let available = min(self.acc_bits as usize, self.remaining) as u32;
+            if available == 0 {
+                break;
+            }
+            let bits = if value { !self.acc } else { self.acc };
+            let count = min(bits.leading_zeros(), available);
+            self.consume(count);
+            total += count as usize;
+            if count < available {
+                break;
+            }
+        }
+        total
+    }
+
+    /// Reads `count` bits (at most 32) as a big-endian number, or `None` if fewer remain.
+    #[inline]
+    fn read(&mut self, count: usize) -> Option<u32> {
+        if count > self.remaining {
+            return None;
+        }
+        if count == 0 {
+            return Some(0);
+        }
+        if (self.acc_bits as usize) < count {
+            self.refill();
+        }
+        let value = (self.acc >> (64 - count)) as u32;
+        self.consume(count as u32);
+        Some(value)
     }
 }
 
-fn load_be_u32(s: &BitSlice<u8, Msb0>) -> u32 {
-    if s.is_empty() { 0 } else { s.load_be::<u32>() }
-}
-
-// Returns number of truncated bits
-fn truncate_leading_value(bits: &mut Bits<'_>, value: bool) -> usize {
-    let leading_values = if value {
-        bits.leading_ones()
-    } else {
-        bits.leading_zeros()
-    };
-    bits.split_to(leading_values);
-    leading_values
-}
-
 fn count_run(number_of_zeros: usize, k: &mut u32, kp: &mut u32) -> u32 {
-    core::iter::repeat_with(|| {
-        let run = 1 << *k;
+    let mut run: u32 = 0;
+    for _ in 0..number_of_zeros {
+        run = run.wrapping_add(1 << *k);
         *kp = min(*kp + UP_GR, KP_MAX);
         *k = *kp >> LS_GR;
-
-        run
-    })
-    .take(number_of_zeros)
-    .sum()
+    }
+    run
 }
 
 fn compute_rl_magnitude(sign_bit: u8, code_remainder: u32) -> Result<i16, RlgrError> {
@@ -403,22 +488,15 @@ fn compute_rlgr1_magnitude(code_remainder: u32, k: &mut u32, kp: &mut u32) -> Re
 
 fn compute_rlgr3_magnitude(val: u32) -> Result<i16, RlgrError> {
     if !val.is_multiple_of(2) {
-        Ok(-i16::try_from((val + 1) >> 1).map_err(|_| RlgrError::InvalidIntegralConversion("(val + 1) >> 1"))?)
+        // `(val + 1) >> 1` without overflowing at `u32::MAX` (reachable from malformed streams).
+        Ok(-i16::try_from((val >> 1) + 1).map_err(|_| RlgrError::InvalidIntegralConversion("(val + 1) >> 1"))?)
     } else {
         i16::try_from(val >> 1).map_err(|_| RlgrError::InvalidIntegralConversion("val >> 1"))
     }
 }
 
-fn compute_n_index(code_remainder: u32) -> usize {
-    if code_remainder == 0 {
-        return 0;
-    }
-
-    let code_bytes = code_remainder.to_be_bytes();
-    let code_bits = BitSlice::<u8, Msb0>::from_slice(code_bytes.as_ref());
-    let leading_zeros = code_bits.leading_zeros();
-
-    32 - leading_zeros
+fn compute_n_index(code_remainder: u32) -> u32 {
+    32 - code_remainder.leading_zeros()
 }
 
 fn update_parameters_according_to_number_of_ones(number_of_ones: usize, kr: &mut u32, krp: &mut u32) {
@@ -494,5 +572,232 @@ impl core::error::Error for RlgrError {
 impl From<io::Error> for RlgrError {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "test data generation and the reference decoder's hot-loop conversions"
+)]
+mod tests {
+    use super::*;
+    use crate::utils::Bits;
+
+    macro_rules! write_byte {
+        ($output:ident, $value:ident) => {
+            if !$output.is_empty() {
+                $output[0] = $value;
+                $output = &mut $output[1..];
+            } else {
+                break;
+            }
+        };
+    }
+
+    fn fill(buffer: &mut [i16], value: i16) {
+        for v in buffer {
+            *v = value;
+        }
+    }
+
+    macro_rules! try_split_bits {
+        ($bits:ident, $n:expr) => {
+            if $bits.len() < $n {
+                break;
+            } else {
+                $bits.split_to($n)
+            }
+        };
+    }
+
+    fn load_be_u32(s: &BitSlice<u8, Msb0>) -> u32 {
+        if s.is_empty() { 0 } else { s.load_be::<u32>() }
+    }
+
+    fn truncate_leading_value(bits: &mut Bits<'_>, value: bool) -> usize {
+        let leading_values = if value {
+            bits.leading_ones()
+        } else {
+            bits.leading_zeros()
+        };
+        bits.split_to(leading_values);
+        leading_values
+    }
+
+    /// The previous `bitvec`-based decoder, kept as the reference for [`decode`] (with the same
+    /// `wrapping_sub`, i.e. its release-build behavior on malformed streams).
+    fn decode_reference(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Result<(), RlgrError> {
+        #![expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            reason = "u32-to-usize and usize-to-u32 conversions, mostly fine, and hot loop"
+        )]
+
+        if tile.is_empty() {
+            return Err(RlgrError::EmptyTile);
+        }
+
+        let mut k: u32 = 1;
+        let mut kr: u32 = 1;
+        let mut kp: u32 = k << LS_GR;
+        let mut krp: u32 = kr << LS_GR;
+
+        let mut bits = Bits::new(BitSlice::from_slice(tile));
+
+        while !bits.is_empty() && !output.is_empty() {
+            match CompressionMode::from(k) {
+                CompressionMode::RunLength => {
+                    let number_of_zeros = truncate_leading_value(&mut bits, false);
+                    try_split_bits!(bits, 1);
+                    let run =
+                        count_run(number_of_zeros, &mut k, &mut kp) + load_be_u32(try_split_bits!(bits, k as usize));
+
+                    let sign_bit = try_split_bits!(bits, 1).load_be::<u8>();
+
+                    let number_of_ones = truncate_leading_value(&mut bits, true);
+                    try_split_bits!(bits, 1);
+
+                    let code_remainder =
+                        load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+
+                    update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
+                    kp = kp.saturating_sub(DN_GR);
+                    k = kp >> LS_GR;
+
+                    let magnitude = compute_rl_magnitude(sign_bit, code_remainder)?;
+
+                    let size = min(run as usize, output.len());
+                    fill(&mut output[..size], 0);
+                    output = &mut output[size..];
+                    write_byte!(output, magnitude);
+                }
+                CompressionMode::GolombRice => {
+                    let number_of_ones = truncate_leading_value(&mut bits, true);
+                    try_split_bits!(bits, 1);
+
+                    let code_remainder =
+                        load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+
+                    update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
+
+                    match mode {
+                        EntropyAlgorithm::Rlgr1 => {
+                            let magnitude = compute_rlgr1_magnitude(code_remainder, &mut k, &mut kp)?;
+                            write_byte!(output, magnitude);
+                        }
+                        EntropyAlgorithm::Rlgr3 => {
+                            let n_index = compute_n_index(code_remainder);
+
+                            let val1 = load_be_u32(try_split_bits!(bits, n_index as usize));
+                            let val2 = code_remainder.wrapping_sub(val1);
+                            if val1 != 0 && val2 != 0 {
+                                kp = kp.saturating_sub(2 * DQ_GR);
+                                k = kp >> LS_GR;
+                            } else if val1 == 0 && val2 == 0 {
+                                kp = min(kp + 2 * UQ_GR, KP_MAX);
+                                k = kp >> LS_GR;
+                            }
+
+                            let magnitude = compute_rlgr3_magnitude(val1)?;
+                            write_byte!(output, magnitude);
+
+                            let magnitude = compute_rlgr3_magnitude(val2)?;
+                            write_byte!(output, magnitude);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fill remaining buffer with zeros.
+        fill(output, 0);
+
+        Ok(())
+    }
+
+    /// Deterministic xorshift so failures are reproducible.
+    fn generator(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    fn assert_same(mode: EntropyAlgorithm, tile: &[u8], len: usize) {
+        let mut expected = vec![0x5555i16; len];
+        let mut actual = vec![0x5555i16; len];
+        let expected_result = decode_reference(mode, tile, &mut expected).map_err(|e| e.to_string());
+        let actual_result = decode(mode, tile, &mut actual).map_err(|e| e.to_string());
+        assert_eq!(actual_result, expected_result, "{mode:?} result of {tile:02x?}");
+        assert_eq!(actual, expected, "{mode:?} output of {tile:02x?}");
+    }
+
+    /// Arbitrary bytes, including truncated and malformed streams, decode exactly as before.
+    #[test]
+    fn decode_matches_reference_on_random_bytes() {
+        let mut next = generator(0x9e37_79b9_7f4a_7c15);
+        for round in 0..20_000 {
+            let size = 1 + (next() % 96) as usize;
+            // Mix dense and sparse streams so long runs of zeros and ones both occur.
+            let density = next() % 4;
+            let tile: Vec<u8> = core::iter::repeat_with(|| {
+                let byte = match density {
+                    0 => 0,
+                    1 => 0xff,
+                    _ => next() as u8,
+                };
+                // Occasionally flip bits so runs end at varied positions.
+                if next().is_multiple_of(3) {
+                    byte ^ (next() as u8 & next() as u8)
+                } else {
+                    byte
+                }
+            })
+            .take(size)
+            .collect();
+            let len = 1 + (next() % 1024) as usize;
+            let mode = if round % 2 == 0 {
+                EntropyAlgorithm::Rlgr1
+            } else {
+                EntropyAlgorithm::Rlgr3
+            };
+            assert_same(mode, &tile, len);
+        }
+    }
+
+    /// Encoded coefficient blocks, whole and cut short, decode exactly as before.
+    #[test]
+    fn decode_matches_reference_on_encoded_tiles() {
+        let mut next = generator(0x0123_4567_89ab_cdef);
+        for round in 0..2_000 {
+            let len = 1 + (next() % 4096) as usize;
+            let sparsity = 1 + next() % 16;
+            let input: Vec<i16> = core::iter::repeat_with(|| {
+                if next().is_multiple_of(sparsity) {
+                    (next() % 2048) as i16 - 1024
+                } else {
+                    0
+                }
+            })
+            .take(len)
+            .collect();
+            let mode = if round % 2 == 0 {
+                EntropyAlgorithm::Rlgr1
+            } else {
+                EntropyAlgorithm::Rlgr3
+            };
+            let mut encoded = vec![0u8; len * 4 + 16];
+            let Ok(size) = encode(mode, &input, &mut encoded) else {
+                continue;
+            };
+            assert_same(mode, &encoded[..size], len);
+            let cut = 1 + (next() as usize % size);
+            assert_same(mode, &encoded[..cut], len);
+        }
     }
 }
