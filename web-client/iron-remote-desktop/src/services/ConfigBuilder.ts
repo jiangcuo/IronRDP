@@ -21,6 +21,7 @@ export class ConfigBuilder {
     private password: string = '';
     private destination: string = '';
     private proxyAddress: string = '';
+    private webSocketUrl: string = '';
     private webSocketProtocols: string[] = [];
     private serverDomain: string = '';
     private authToken: string = '';
@@ -73,6 +74,19 @@ export class ConfigBuilder {
      */
     withProxyAddress(proxyAddress: string): ConfigBuilder {
         this.proxyAddress = proxyAddress;
+        return this;
+    }
+
+    /**
+     * Alternative to the proxy address and authentication token: connects through a WebSocket relay
+     * at this URL, which forwards raw bytes to the server; the client performs the TLS upgrade itself.
+     * The destination then defaults to the URL host.
+     *
+     * @param url - The URL to connect to
+     * @returns The builder instance for method chaining
+     */
+    withWebSocketUrl(url: string): ConfigBuilder {
+        this.webSocketUrl = url;
         return this;
     }
 
@@ -134,18 +148,25 @@ export class ConfigBuilder {
     /**
      * Builds a new Config instance.
      *
-     * @throws {Error} If required parameters (destination, proxyAddress, authToken) are not set
+     * @throws {Error} If required parameters (destination, proxyAddress, authToken) are not set,
+     * or if a WebSocket URL is combined with a proxy address or authentication token
      * @returns A new Config instance with the configured values
      */
     build(): Config {
-        if (this.destination === '') {
-            throw new Error('destination has to be specified');
-        }
-        if (this.proxyAddress === '') {
-            throw new Error('proxy address has to be specified');
-        }
-        if (this.authToken === '') {
-            throw new Error('authentication token has to be specified');
+        if (this.webSocketUrl !== '') {
+            if (this.proxyAddress !== '' || this.authToken !== '') {
+                throw new Error('WebSocket URL is mutually exclusive with proxy address and authentication token');
+            }
+        } else {
+            if (this.destination === '') {
+                throw new Error('destination has to be specified');
+            }
+            if (this.proxyAddress === '') {
+                throw new Error('proxy address has to be specified');
+            }
+            if (this.authToken === '') {
+                throw new Error('authentication token has to be specified');
+            }
         }
         const userData = { username: this.username, password: this.password };
         const proxyData = { address: this.proxyAddress, authToken: this.authToken };
@@ -156,6 +177,7 @@ export class ConfigBuilder {
             webSocketProtocols: this.webSocketProtocols,
             extensions: this.extensions,
             desktopSize: this.desktopSize,
+            webSocketUrl: this.webSocketUrl !== '' ? this.webSocketUrl : undefined,
         };
 
         return new Config(userData, proxyData, configOptions);

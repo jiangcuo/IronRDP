@@ -11,6 +11,7 @@ export class Config {
     readonly authToken: string;
     readonly desktopSize?: DesktopSize;
     readonly extensions: Extension[];
+    readonly webSocketUrl?: string;
 
     constructor(
         userData: { username: string; password: string },
@@ -21,6 +22,7 @@ export class Config {
             webSocketProtocols?: string[];
             extensions: Extension[];
             desktopSize?: DesktopSize;
+            webSocketUrl?: string;
         },
     ) {
         this.username = userData.username;
@@ -32,5 +34,6 @@ export class Config {
         this.webSocketProtocols = configOptions.webSocketProtocols ?? [];
         this.extensions = configOptions.extensions;
         this.desktopSize = configOptions.desktopSize;
+        this.webSocketUrl = configOptions.webSocketUrl;
     }
 }

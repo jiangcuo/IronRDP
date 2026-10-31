@@ -179,6 +179,9 @@ export class RemoteDesktopService {
         sessionBuilder.serverDomain(config.serverDomain);
         sessionBuilder.password(config.password);
         sessionBuilder.authToken(config.authToken);
+        if (config.webSocketUrl !== undefined) {
+            sessionBuilder.webSocketUrl(config.webSocketUrl);
+        }
         sessionBuilder.username(config.username);
         sessionBuilder.renderCanvas(this.canvas!);
         sessionBuilder.setCursorStyleCallbackContext(this);

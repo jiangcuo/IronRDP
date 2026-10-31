@@ -64,6 +64,12 @@ js-sys = "0.3"
 gloo-net = { version = "0.7", default-features = false, features = ["websocket", "http", "io-util"] }
 gloo-timers = { version = "0.4", default-features = false, features = ["futures"] }
 
+# TLS of the RDP security upgrade over a direct URL
+futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Enable WebAssembly support for rustls: randomness (ring) and time (pki-types) from the browser
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
+rustls-pki-types = { version = "1", features = ["web"] }
+
 # Rendering
 png = "0.18"
 resize = { version = "0.8", features = ["std"], default-features = false }

@@ -26,6 +26,11 @@ export interface SessionBuilder {
     proxyAddress(address: string): SessionBuilder;
     /**
      * Optional
+     * Connects through a WebSocket relay at this URL, which forwards raw bytes to the server, instead of through the proxy.
+     */
+    webSocketUrl(url: string): SessionBuilder;
+    /**
+     * Optional
      * Copies the offered subprotocols. An empty array disables subprotocol negotiation.
      * Non-array inputs or non-string entries cause connect() to reject.
      */

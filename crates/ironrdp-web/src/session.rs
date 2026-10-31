@@ -4,6 +4,7 @@ use core::num::NonZeroU32;
 use core::time::Duration;
 use std::borrow::Cow;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::canvas::Canvas;
 use crate::clipboard;
@@ -66,6 +67,8 @@ struct SessionBuilderInner {
     server_domain: Option<String>,
     password: Option<String>,
     proxy_address: Option<String>,
+    /// WebSocket URL; see [`iron_remote_desktop::SessionBuilder::websocket_url`].
+    websocket_url: Option<String>,
     websocket_protocols: Result<Option<js_sys::Array>, &'static str>,
     auth_token: Option<String>,
     pcb: Option<String>,
@@ -111,6 +114,7 @@ impl Default for SessionBuilderInner {
             server_domain: None,
             password: None,
             proxy_address: None,
+            websocket_url: None,
             websocket_protocols: Ok(None),
             auth_token: None,
             pcb: None,
@@ -190,6 +194,11 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
     /// Required
     fn proxy_address(&self, address: String) -> Self {
         self.0.borrow_mut().proxy_address = Some(address);
+        self.clone()
+    }
+
+    fn websocket_url(&self, url: String) -> Self {
+        self.0.borrow_mut().websocket_url = Some(url);
         self.clone()
     }
 
@@ -378,9 +387,8 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             destination,
             server_domain,
             password,
-            proxy_address,
+            route,
             websocket_protocols,
-            auth_token,
             pcb,
             vmconnect,
             kdc_proxy_url,
@@ -413,11 +421,26 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
 
             websocket_protocols = inner.websocket_protocols.clone().map_err(anyhow::Error::msg)?;
             username = inner.username.clone().context("username missing")?;
-            destination = inner.destination.clone().context("destination missing")?;
+            route = match inner.websocket_url.clone() {
+                Some(url) => Route::WebSocket { url },
+                None => Route::Gateway {
+                    proxy_address: inner.proxy_address.clone().context("proxy_address missing")?,
+                    proxy_auth_token: inner.auth_token.clone().context("auth_token missing")?,
+                },
+            };
+            destination = match &route {
+                // Without a destination (the JS bridge passes it empty), the URL host names the
+                // server for TLS and CredSSP.
+                Route::WebSocket { url } => {
+                    match inner.destination.clone().filter(|destination| !destination.is_empty()) {
+                        Some(destination) => destination,
+                        None => url_destination(url)?,
+                    }
+                }
+                Route::Gateway { .. } => inner.destination.clone().context("destination missing")?,
+            };
             server_domain = inner.server_domain.clone();
             password = inner.password.clone().context("password missing")?;
-            proxy_address = inner.proxy_address.clone().context("proxy_address missing")?;
-            auth_token = inner.auth_token.clone().context("auth_token missing")?;
             pcb = inner.pcb.clone();
             vmconnect = inner.vmconnect.clone();
             kdc_proxy_url = inner.kdc_proxy_url.clone();
@@ -458,6 +481,12 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
 
         if pcb.is_some() && vmconnect.is_some() {
             return Err(anyhow::Error::msg("generic preconnection blob and VMConnect are mutually exclusive").into());
+        }
+
+        if matches!(route, Route::WebSocket { .. }) && (pcb.is_some() || vmconnect.is_some()) {
+            return Err(
+                anyhow::Error::msg("preconnection blob and VMConnect are sent to a gateway, not to a relay").into(),
+            );
         }
 
         if security.enable_standard_rdp_security && vmconnect.is_some() {
@@ -522,12 +551,14 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         let printer_name = printer_name.unwrap_or_else(|| "IronRDP Virtual Printer".to_owned());
         let printer_driver_name = printer_driver_name.unwrap_or_else(default_printer_driver_name);
 
+        let websocket_address = route.websocket_address();
+
         let ws = if let Some(protocols) = websocket_protocols {
-            web_sys::WebSocket::new_with_str_sequence(&proxy_address, &protocols)
+            web_sys::WebSocket::new_with_str_sequence(websocket_address, &protocols)
                 .map_err(|error| anyhow::anyhow!("{error:?}"))
                 .and_then(|socket| WebSocket::try_from(socket).map_err(anyhow::Error::from))
         } else {
-            WebSocket::open(&proxy_address).map_err(anyhow::Error::from)
+            WebSocket::open(websocket_address).map_err(anyhow::Error::from)
         }
         .context("couldn't open WebSocket")?;
 
@@ -539,17 +570,17 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             match ws.state() {
                 websocket::State::Closing | websocket::State::Closed => {
                     return Err(IronError::from(anyhow::anyhow!(
-                        "failed to connect to {proxy_address} (WebSocket is `{:?}`)",
+                        "failed to connect to {websocket_address} (WebSocket is `{:?}`)",
                         ws.state()
                     ))
                     .with_kind(IronErrorKind::ProxyConnect));
                 }
                 websocket::State::Connecting => {
-                    trace!("WebSocket is connecting to proxy at {proxy_address}...");
+                    trace!("WebSocket is connecting to {websocket_address}...");
                     gloo_timers::future::sleep(Duration::from_millis(50)).await;
                 }
                 websocket::State::Open => {
-                    debug!("WebSocket connected to {proxy_address} with success");
+                    debug!("WebSocket connected to {websocket_address} with success");
                     break;
                 }
             }
@@ -560,7 +591,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         let (connection_result, ws) = connect(ConnectParams {
             ws,
             config,
-            proxy_auth_token: auth_token,
+            route,
             destination,
             pcb,
             vmconnect,
@@ -644,7 +675,7 @@ pub(crate) struct Session {
     // Consumed when `run` is called
     input_events_rx: RefCell<Option<mpsc::UnboundedReceiver<RdpInputEvent>>>,
     connection_result: RefCell<Option<connector::ConnectionResult>>,
-    rdp_reader: RefCell<Option<ReadHalf<WebSocket>>>,
+    rdp_reader: RefCell<Option<ReadHalf<BoxedRdpStream>>>,
     clipboard: RefCell<Option<Option<WasmClipboard>>>,
     printer: RefCell<Option<Option<WasmPrinter>>>,
 }
@@ -1608,14 +1639,14 @@ fn build_config(
 
 async fn writer_task(
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    rdp_writer: WriteHalf<WebSocket>,
+    rdp_writer: WriteHalf<BoxedRdpStream>,
     outbound_limit: Option<usize>,
 ) {
     debug!("writer task started");
 
     async fn inner(
         mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        mut rdp_writer: WriteHalf<WebSocket>,
+        mut rdp_writer: WriteHalf<BoxedRdpStream>,
         outbound_limit: Option<usize>,
     ) -> anyhow::Result<()> {
         while let Some(frame) = rx.next().await {
@@ -1647,7 +1678,7 @@ async fn writer_task(
 struct ConnectParams {
     ws: WebSocket,
     config: connector::Config,
-    proxy_auth_token: String,
+    route: Route,
     destination: String,
     pcb: Option<String>,
     vmconnect: Option<String>,
@@ -1661,6 +1692,26 @@ struct ConnectParams {
     /// `computer_name` when constructing the `Rdpdr` processor.
     computer_name: String,
     use_display_control: bool,
+}
+
+/// Where the WebSocket leads.
+enum Route {
+    /// An RDCleanPath gateway, which connects to the destination on behalf of the client.
+    Gateway {
+        proxy_address: String,
+        proxy_auth_token: String,
+    },
+    /// A relay forwarding bytes to the server; see [`iron_remote_desktop::SessionBuilder::websocket_url`].
+    WebSocket { url: String },
+}
+
+impl Route {
+    fn websocket_address(&self) -> &str {
+        match self {
+            Self::Gateway { proxy_address, .. } => proxy_address,
+            Self::WebSocket { url } => url,
+        }
+    }
 }
 
 fn default_printer_driver_name() -> String {
@@ -1699,7 +1750,7 @@ async fn connect(
     ConnectParams {
         ws,
         config,
-        proxy_auth_token,
+        route,
         destination,
         pcb,
         vmconnect,
@@ -1712,7 +1763,7 @@ async fn connect(
         computer_name,
         use_display_control,
     }: ConnectParams,
-) -> Result<(connector::ConnectionResult, WebSocket), IronError> {
+) -> Result<(connector::ConnectionResult, BoxedRdpStream), IronError> {
     let mut framed = ironrdp_futures::LocalFuturesFramed::new(ws);
 
     // In web browser environments, we do not have an easy access to the local address of the socket.
@@ -1755,6 +1806,22 @@ async fn connect(
 
     let mut network_client = WasmNetworkClient;
     let server_name = connector::ServerName::from(destination.as_str());
+
+    let proxy_auth_token = match route {
+        Route::Gateway { proxy_auth_token, .. } => proxy_auth_token,
+        Route::WebSocket { .. } => {
+            return connect_websocket(
+                framed,
+                connector,
+                network_client,
+                server_name,
+                destination,
+                kerberos_config,
+            )
+            .await;
+        }
+    };
+
     let (upgraded, server_public_key) = connect_rdcleanpath(
         &mut framed,
         &mut connector,
@@ -1784,7 +1851,164 @@ async fn connect(
 
     let ws = framed.into_inner_no_leftover();
 
-    Ok((connection_result, ws))
+    Ok((connection_result, Box::new(ws)))
+}
+
+/// Connects over a WebSocket that relays bytes to the server: the RDP security upgrade (TLS) runs
+/// here, over the WebSocket, as it would over TCP.
+async fn connect_websocket(
+    mut framed: ironrdp_futures::LocalFuturesFramed<WebSocket>,
+    mut connector: ClientConnector,
+    mut network_client: WasmNetworkClient,
+    server_name: connector::ServerName,
+    destination: String,
+    kerberos_config: Option<KerberosConfig>,
+) -> Result<(connector::ConnectionResult, BoxedRdpStream), IronError> {
+    let should_upgrade = ironrdp_futures::connect_begin(&mut framed, &mut connector).await?;
+
+    let ws = framed.into_inner_no_leftover();
+    let (tls_stream, server_public_key) = tls_upgrade(ws, &destination).await?;
+
+    let upgraded = ironrdp_futures::mark_as_upgraded(should_upgrade, &mut connector);
+    let tls_stream: BoxedRdpStream = Box::new(tls_stream);
+    let mut framed = ironrdp_futures::LocalFuturesFramed::new(tls_stream);
+
+    let connection_result = ironrdp_futures::connect_finalize(
+        upgraded,
+        connector,
+        &mut framed,
+        &mut network_client,
+        server_name,
+        server_public_key,
+        kerberos_config,
+    )
+    .await?
+    .into_connected()?;
+
+    Ok((connection_result, framed.into_inner_no_leftover()))
+}
+
+/// Validates a relay URL and returns its `host[:port]`, the default destination.
+fn url_destination(url: &str) -> anyhow::Result<String> {
+    let parsed = url::Url::parse(url).with_context(|| format!("invalid URL `{url}`"))?;
+
+    match parsed.scheme() {
+        "ws" | "wss" => {}
+        scheme => anyhow::bail!("unsupported URL scheme `{scheme}` (expected `ws` or `wss`)"),
+    }
+
+    let host = parsed.host_str().context("URL has no host")?;
+
+    Ok(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+/// Returns the host of a `host[:port]` destination, where an IPv6 host is bracketed.
+fn destination_host(destination: &str) -> &str {
+    match destination.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(host, _)| host),
+        None => destination.split_once(':').map_or(destination, |(host, _)| host),
+    }
+}
+
+fn tls_server_name(destination: &str) -> anyhow::Result<futures_rustls::rustls::pki_types::ServerName<'static>> {
+    let host = destination_host(destination);
+
+    futures_rustls::rustls::pki_types::ServerName::try_from(host.to_owned())
+        .with_context(|| format!("`{host}` is not a valid TLS server name"))
+}
+
+/// Transport carrying the RDP session after connection: the WebSocket itself (RDCleanPath)
+/// or a TLS session layered on top of it (relay).
+trait RdpStream: futures_util::AsyncRead + futures_util::AsyncWrite + Unpin {}
+
+impl<T: futures_util::AsyncRead + futures_util::AsyncWrite + Unpin> RdpStream for T {}
+
+type BoxedRdpStream = Box<dyn RdpStream>;
+
+/// Performs the TLS handshake of the RDP security upgrade over the WebSocket and returns the
+/// server public key used to bind CredSSP.
+async fn tls_upgrade(
+    ws: WebSocket,
+    destination: &str,
+) -> Result<(futures_rustls::client::TlsStream<WebSocket>, Vec<u8>), IronError> {
+    use futures_rustls::rustls;
+    use x509_cert::der::Decode as _;
+
+    // RDP servers typically use self-signed certificates; like `/cert:ignore`, the
+    // certificate is not verified here. CredSSP still binds to its public key.
+    #[derive(Debug)]
+    struct NoCertificateVerification(Arc<rustls::crypto::CryptoProvider>);
+
+    impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &[rustls::pki_types::CertificateDer<'_>],
+            _: &rustls::pki_types::ServerName<'_>,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &rustls::pki_types::CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &rustls::pki_types::CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .context("TLS protocol versions")?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider)))
+        .with_no_client_auth();
+    // CredSSP does not support TLS session resumption.
+    config.resumption = rustls::client::Resumption::disabled();
+
+    let tls_stream = futures_rustls::TlsConnector::from(Arc::new(config))
+        .connect(tls_server_name(destination)?, ws)
+        .await
+        .context("TLS handshake")?;
+
+    let server_cert = tls_stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .context("server did not send a certificate")?;
+
+    let cert = x509_cert::Certificate::from_der(server_cert.as_ref()).context("decode server certificate")?;
+    let server_public_key = cert
+        .tbs_certificate()
+        .subject_public_key_info()
+        .subject_public_key
+        .as_bytes()
+        .context("subject public key BIT STRING is not aligned")?
+        .to_owned();
+
+    Ok((tls_stream, server_public_key))
 }
 
 struct RDCleanPathConnectParams {

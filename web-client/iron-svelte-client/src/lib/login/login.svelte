@@ -27,6 +27,10 @@
     let vmconnectMode: VmConnectMode = 'enhanced';
     let pop_up = false;
     let enable_clipboard = true;
+    // 'websocket': RDP straight over a WebSocket byte relay (TLS in the browser);
+    // 'gateway': through an RDCleanPath gateway that connects to `hostname` for us.
+    let transport: 'websocket' | 'gateway' = 'gateway';
+    let websocketUrl = 'ws://127.0.0.1:3390';
 
     let userInteraction: UserInteraction;
 
@@ -44,7 +48,7 @@
     };
 
     const StartSession = async () => {
-        if (authtoken === '') {
+        if (transport === 'gateway' && authtoken === '') {
             const token_server_url = import.meta.env.VITE_IRON_TOKEN_SERVER_URL as string | undefined;
             if (token_server_url === undefined || token_server_url.trim() === '') {
                 toast.set({
@@ -119,23 +123,26 @@
             .configBuilder()
             .withUsername(username)
             .withPassword(password)
-            .withDestination(hostname)
-            .withProxyAddress(gatewayAddress)
             .withServerDomain(domain)
-            .withAuthToken(authtoken)
             .withDesktopSize(desktopSize)
             .withExtension(displayControl(true));
 
-        if (pcb !== '') {
-            configBuilder.withExtension(preConnectionBlob(pcb));
-        }
+        if (transport === 'websocket') {
+            configBuilder.withWebSocketUrl(websocketUrl);
+        } else {
+            configBuilder.withProxyAddress(gatewayAddress).withDestination(hostname).withAuthToken(authtoken);
 
-        if (vmconnectId !== '') {
-            configBuilder.withExtension(vmConnect(vmconnectId, vmconnectMode));
-        }
+            if (pcb !== '') {
+                configBuilder.withExtension(preConnectionBlob(pcb));
+            }
 
-        if (kdc_proxy_url !== '') {
-            configBuilder.withExtension(kdcProxyUrl(kdc_proxy_url));
+            if (vmconnectId !== '') {
+                configBuilder.withExtension(vmConnect(vmconnectId, vmconnectMode));
+            }
+
+            if (kdc_proxy_url !== '') {
+                configBuilder.withExtension(kdcProxyUrl(kdc_proxy_url));
+            }
         }
 
         const config = configBuilder.build();
@@ -200,9 +207,23 @@
                     <div class="medium-space" />
                     <div>
                         <div class="field label border">
-                            <input id="hostname" type="text" bind:value={hostname} />
-                            <label for="hostname">Hostname</label>
+                            <select id="transport" bind:value={transport}>
+                                <option value="websocket">WebSocket</option>
+                                <option value="gateway">Gateway (RDCleanPath)</option>
+                            </select>
+                            <label for="transport">Transport</label>
                         </div>
+                        {#if transport === 'websocket'}
+                            <div class="field label border">
+                                <input id="websocketUrl" type="text" bind:value={websocketUrl} />
+                                <label for="websocketUrl">WebSocket URL</label>
+                            </div>
+                        {:else}
+                            <div class="field label border">
+                                <input id="hostname" type="text" bind:value={hostname} />
+                                <label for="hostname">Hostname</label>
+                            </div>
+                        {/if}
                         <div class="field label border">
                             <input id="domain" type="text" bind:value={domain} />
                             <label for="domain">Domain</label>
@@ -215,29 +236,31 @@
                             <input id="password" type="password" bind:value={password} />
                             <label for="password">Password</label>
                         </div>
-                        <div class="field label border">
-                            <input id="gatewayAddress" type="text" bind:value={gatewayAddress} />
-                            <label for="gatewayAddress">Gateway Address</label>
-                        </div>
-                        <div class="field label border">
-                            <input id="authtoken" type="text" bind:value={authtoken} />
-                            <label for="authtoken">AuthToken (Optional)</label>
-                        </div>
-                        <div class="field label border">
-                            <input id="pcb" type="text" bind:value={pcb} />
-                            <label for="pcb">Legacy Pre Connection Blob</label>
-                        </div>
-                        <div class="field label border">
-                            <input id="vmconnect_id" type="text" bind:value={vmconnectId} />
-                            <label for="vmconnect_id">VMConnect VM ID</label>
-                        </div>
-                        <div class="field label border">
-                            <select id="vmconnect_mode" bind:value={vmconnectMode}>
-                                <option value="enhanced">Enhanced</option>
-                                <option value="basic">Basic</option>
-                            </select>
-                            <label for="vmconnect_mode">VMConnect Mode</label>
-                        </div>
+                        {#if transport === 'gateway'}
+                            <div class="field label border">
+                                <input id="gatewayAddress" type="text" bind:value={gatewayAddress} />
+                                <label for="gatewayAddress">Gateway Address</label>
+                            </div>
+                            <div class="field label border">
+                                <input id="authtoken" type="text" bind:value={authtoken} />
+                                <label for="authtoken">AuthToken (Optional)</label>
+                            </div>
+                            <div class="field label border">
+                                <input id="pcb" type="text" bind:value={pcb} />
+                                <label for="pcb">Legacy Pre Connection Blob</label>
+                            </div>
+                            <div class="field label border">
+                                <input id="vmconnect_id" type="text" bind:value={vmconnectId} />
+                                <label for="vmconnect_id">VMConnect VM ID</label>
+                            </div>
+                            <div class="field label border">
+                                <select id="vmconnect_mode" bind:value={vmconnectMode}>
+                                    <option value="enhanced">Enhanced</option>
+                                    <option value="basic">Basic</option>
+                                </select>
+                                <label for="vmconnect_mode">VMConnect Mode</label>
+                            </div>
+                        {/if}
                         <div class="field label border">
                             <input id="desktopSizeW" type="text" bind:value={desktopSize.width} />
                             <label for="desktopSizeW">Desktop Width</label>
@@ -246,10 +269,12 @@
                             <input id="desktopSizeH" type="text" bind:value={desktopSize.height} />
                             <label for="desktopSizeH">Desktop Height</label>
                         </div>
-                        <div class="field label border">
-                            <input id="kdc_proxy_url" type="text" bind:value={kdc_proxy_url} />
-                            <label for="kdc_proxy_url">KDC Proxy URL</label>
-                        </div>
+                        {#if transport === 'gateway'}
+                            <div class="field label border">
+                                <input id="kdc_proxy_url" type="text" bind:value={kdc_proxy_url} />
+                                <label for="kdc_proxy_url">KDC Proxy URL</label>
+                            </div>
+                        {/if}
                         <div class="field label border checkbox-container">
                             <div class="checkbox-wrapper">
                                 <input

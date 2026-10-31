@@ -27,6 +27,12 @@ pub trait SessionBuilder {
     #[must_use]
     fn proxy_address(&self, address: String) -> Self;
 
+    /// Connects through a WebSocket relay at this URL, which forwards raw RDP bytes to the server,
+    /// instead of through a proxy: the client performs the TLS upgrade itself, no proxy address or
+    /// authentication token is used, and the destination defaults to the URL host.
+    #[must_use]
+    fn websocket_url(&self, url: String) -> Self;
+
     /// Copies the offered WebSocket subprotocols. An empty array disables subprotocol negotiation.
     /// Non-array inputs or invalid entries cause `connect()` to return an error.
     #[must_use]

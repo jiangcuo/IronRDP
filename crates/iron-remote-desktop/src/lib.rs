@@ -228,6 +228,11 @@ macro_rules! make_bridge {
                 Self($crate::SessionBuilder::proxy_address(&self.0, address))
             }
 
+            #[wasm_bindgen(js_name = webSocketUrl)]
+            pub fn websocket_url(&self, url: String) -> Self {
+                Self($crate::SessionBuilder::websocket_url(&self.0, url))
+            }
+
             #[wasm_bindgen(js_name = webSocketProtocols)]
             pub fn websocket_protocols(&self, protocols: $crate::internal::web_sys::js_sys::Array) -> Self {
                 Self($crate::SessionBuilder::websocket_protocols(&self.0, protocols))
