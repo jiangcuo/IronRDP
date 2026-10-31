@@ -3413,6 +3413,7 @@ fn active_x_transport_from_client_transport(
         // Named-pipe RDP (e.g. Windows Sandbox) is agent/desktop-client only.
         Transport::NamedPipe { .. } => Err("Windows named-pipe transport is not supported by the ActiveX host"),
         Transport::GatewayRpch(_) => Err("RPC-over-HTTP gateway transport is not supported by the ActiveX host"),
+        Transport::WebSocket { .. } => Err("WebSocket transport is not supported by the ActiveX host"),
     }
 }
 
@@ -12108,6 +12109,9 @@ impl Control {
                 }
                 Transport::GatewayRpch(_) => {
                     unreachable!("GatewayRpch must fail RPC connect before compatibility settings")
+                }
+                Transport::WebSocket { .. } => {
+                    unreachable!("WebSocket must fail RPC connect before compatibility settings")
                 }
             }
         }

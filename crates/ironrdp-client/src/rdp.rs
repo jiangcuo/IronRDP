@@ -1533,6 +1533,43 @@ impl RdpClient {
                     }
                 },
 
+                Transport::WebSocket { url } => match Box::pin(cancelable_operation(
+                    connect_websocket(
+                        &self.config,
+                        url,
+                        &self.input_event_sender,
+                        &self.output_event_sender,
+                        cliprdr_factory,
+                        rdpdr_factory,
+                        reconnect_cookie,
+                    ),
+                    &mut self.close_receiver,
+                ))
+                .await
+                {
+                    Some(Ok(result)) => result,
+                    Some(Err(error)) => {
+                        if self
+                            .try_auto_reconnect(
+                                auto_reconnect_policy,
+                                &mut reconnect_attempt,
+                                auto_reconnect_cookie.as_ref(),
+                            )
+                            .await
+                        {
+                            continue;
+                        }
+                        if !self.send_output_event(RdpOutputEvent::ConnectionFailure(error)).await {
+                            self.emit_user_initiated_termination();
+                        }
+                        break;
+                    }
+                    None => {
+                        self.emit_user_initiated_termination();
+                        break;
+                    }
+                },
+
                 #[cfg(windows)]
                 Transport::NamedPipe { path } => match Box::pin(cancelable_operation(
                     connect_named_pipe(
@@ -3540,6 +3577,52 @@ where
 }
 
 /// RDCleanPath WebSocket → RDCleanPath handshake connection.
+/// WebSocket relay → TLS connection: the relay forwards raw RDP bytes, so the security
+/// upgrade runs over the WebSocket as it would over TCP.
+async fn connect_websocket(
+    config: &Config,
+    url: &url::Url,
+    input_sender: &RdpInputSender,
+    output_event_sender: &crate::output_channel::OutputEventSender,
+    cliprdr_factory: CliprdrFactoryRef<'_>,
+    rdpdr_factory: RdpdrFactoryRef<'_>,
+    auto_reconnect_cookie: Option<&ServerAutoReconnect>,
+) -> ConnectorResult<ConnectOutput> {
+    let hostname = url
+        .host_str()
+        .ok_or_else(|| ironrdp_connector::general_err!("host missing from the URL"))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    let socket = TcpStream::connect((hostname, port))
+        .await
+        .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
+    socket
+        .set_nodelay(true)
+        .map_err(|e| ironrdp_connector::custom_err!("set TCP_NODELAY", e))?;
+    let client_addr = socket
+        .local_addr()
+        .map_err(|e| ironrdp_connector::custom_err!("get socket local address", e))?;
+
+    let (ws, _) = tokio_tungstenite::client_async_tls(url.as_str(), socket)
+        .await
+        .map_err(|e| ironrdp_connector::custom_err!("WS connect", e))?;
+    let framed = ironrdp_tokio::TokioFramed::new(crate::ws::websocket_compat(ws));
+
+    let connector = build_connector(
+        config,
+        client_addr,
+        (input_sender, output_event_sender),
+        cliprdr_factory,
+        rdpdr_factory,
+        RdpdrDevicePolicy::ALLOW_ALL,
+        true,
+        false,
+        auto_reconnect_cookie,
+    )?;
+
+    Box::pin(security_upgrade_and_finalize(framed, connector, config, None)).await
+}
+
 async fn connect_rdcleanpath_transport(
     config: &Config,
     rdcp: &RDCleanPathConfig,

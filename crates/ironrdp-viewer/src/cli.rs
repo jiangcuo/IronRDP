@@ -155,6 +155,10 @@ struct Args {
     #[clap(long, requires("rdcleanpath_url"))]
     rdcleanpath_token: Option<String>,
 
+    /// WebSocket URL of a relay forwarding raw RDP bytes to the server (e.g. websockify)
+    #[clap(long, conflicts_with("rdcleanpath_url"))]
+    websocket_url: Option<Url>,
+
     /// Connect to a Hyper-V VM console instead of an RDP host, by VM ID (`Get-VM | Select Id`).
     ///
     /// The destination is the Hyper-V host, which listens on port 2179. TLS and CredSSP are
@@ -1007,6 +1011,8 @@ fn apply_cli_to_builder(
         if let Some(token) = args.rdcleanpath_token {
             builder = builder.with_rdcleanpath_token(token);
         }
+    } else if let Some(url) = args.websocket_url {
+        builder = builder.with_transport(TransportKind::WebSocket { url });
     } else if let Some(endpoint) = args.gw_endpoint {
         builder = builder.with_transport(TransportKind::Gateway {
             endpoint,

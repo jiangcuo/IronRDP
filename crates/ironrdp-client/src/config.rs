@@ -670,6 +670,13 @@ pub enum Transport {
     /// Connect via an RDCleanPath proxy (WebSocket-based).
     RDCleanPath(RDCleanPathConfig),
 
+    /// Connect through a WebSocket relay forwarding raw RDP bytes to the server; the client
+    /// performs the TLS security upgrade itself, as over TCP.
+    WebSocket {
+        /// WebSocket URL (`ws://` or `wss://`).
+        url: Url,
+    },
+
     /// Windows named-pipe byte stream carrying TPKT/X.224 (e.g. Windows Sandbox `\\.\pipe\{VMId}`).
     ///
     /// Typically used with standard RDP security (`enable_tls`/`enable_credssp` both false).
@@ -732,6 +739,12 @@ pub enum TransportKind {
     /// [`with_rdcleanpath_token`](ConfigBuilder::with_rdcleanpath_token).
     RDCleanPath {
         /// RDCleanPath proxy URL.
+        url: Url,
+    },
+
+    /// Connect through a WebSocket relay forwarding raw RDP bytes to the server.
+    WebSocket {
+        /// WebSocket URL (`ws://` or `wss://`).
         url: Url,
     },
 
@@ -1581,15 +1594,24 @@ impl ConfigBuilder {
         match &transport {
             TransportKind::Direct => {
                 self.properties.clear_rdcleanpath();
+                self.properties.clear_websocket_url();
                 self.properties.clear_gateway();
                 #[cfg(windows)]
                 self.properties.clear_named_pipe();
             }
             TransportKind::RDCleanPath { url } => {
+                self.properties.clear_websocket_url();
                 self.properties.clear_gateway();
                 #[cfg(windows)]
                 self.properties.clear_named_pipe();
                 self.properties.set_rdcleanpath_url(url.to_string());
+            }
+            TransportKind::WebSocket { url } => {
+                self.properties.clear_rdcleanpath();
+                self.properties.clear_gateway();
+                #[cfg(windows)]
+                self.properties.clear_named_pipe();
+                self.properties.set_websocket_url(url.to_string());
             }
             #[cfg(feature = "gateway")]
             TransportKind::Gateway {
@@ -1601,6 +1623,7 @@ impl ConfigBuilder {
                 prefer_direct,
             } => {
                 self.properties.clear_rdcleanpath();
+                self.properties.clear_websocket_url();
                 #[cfg(windows)]
                 self.properties.clear_named_pipe();
                 self.properties.set_gateway_hostname(endpoint.clone());
@@ -1616,6 +1639,7 @@ impl ConfigBuilder {
             #[cfg(windows)]
             TransportKind::NamedPipe { path } => {
                 self.properties.clear_rdcleanpath();
+                self.properties.clear_websocket_url();
                 self.properties.clear_gateway();
                 self.properties.set_named_pipe(path.clone());
             }
@@ -2575,6 +2599,7 @@ impl ConfigBuilder {
                 url,
                 auth_token: self.rdcleanpath_token.unwrap(),
             }),
+            TransportKind::WebSocket { url } => Transport::WebSocket { url },
             #[cfg(windows)]
             TransportKind::NamedPipe { path } => Transport::NamedPipe { path },
         };
@@ -3089,7 +3114,7 @@ impl ConfigBuilder {
             });
         }
 
-        // Transport: NamedPipe > RDCleanPath > Gateway > Direct.
+        // Transport: NamedPipe > RDCleanPath > WebSocket > Gateway > Direct.
         #[cfg(windows)]
         if let Some(path) = ps.named_pipe() {
             self.transport = TransportKind::NamedPipe { path: path.to_owned() };
@@ -3097,6 +3122,9 @@ impl ConfigBuilder {
             let url = Url::parse(url).context("invalid 'ironrdp_rdcleanpathurl'")?;
             self.transport = TransportKind::RDCleanPath { url };
             self.rdcleanpath_token = Some(token.to_owned());
+        } else if let Some(url) = ps.websocket_url() {
+            let url = Url::parse(url).context("invalid 'ironrdp_websocketurl'")?;
+            self.transport = TransportKind::WebSocket { url };
         } else {
             #[cfg(feature = "gateway")]
             {
@@ -3142,6 +3170,9 @@ impl ConfigBuilder {
             let url = Url::parse(url).context("invalid 'ironrdp_rdcleanpathurl'")?;
             self.transport = TransportKind::RDCleanPath { url };
             self.rdcleanpath_token = Some(token.to_owned());
+        } else if let Some(url) = ps.websocket_url() {
+            let url = Url::parse(url).context("invalid 'ironrdp_websocketurl'")?;
+            self.transport = TransportKind::WebSocket { url };
         } else {
             #[cfg(feature = "gateway")]
             {

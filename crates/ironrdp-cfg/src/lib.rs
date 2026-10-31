@@ -863,6 +863,13 @@ pub trait PropertySetExt {
     /// Removes the `ironrdp_rdcleanpathurl` property.
     fn clear_rdcleanpath_url(&mut self);
 
+    /// WebSocket relay URL (`ironrdp_websocketurl`).
+    fn websocket_url(&self) -> Option<&str>;
+    /// Sets the `ironrdp_websocketurl` property.
+    fn set_websocket_url(&mut self, value: impl Into<String>);
+    /// Removes the `ironrdp_websocketurl` property.
+    fn clear_websocket_url(&mut self);
+
     /// Windows named-pipe RDP path (`ironrdp_named_pipe`), e.g. `\\.\pipe\{VMId}`.
     fn named_pipe(&self) -> Option<&str>;
     /// Sets the `ironrdp_named_pipe` property.
@@ -1571,6 +1578,18 @@ impl PropertySetExt for PropertySet {
 
     fn clear_rdcleanpath_url(&mut self) {
         self.remove("ironrdp_rdcleanpathurl");
+    }
+
+    fn websocket_url(&self) -> Option<&str> {
+        self.get::<&str>("ironrdp_websocketurl")
+    }
+
+    fn set_websocket_url(&mut self, value: impl Into<String>) {
+        self.insert("ironrdp_websocketurl", value.into());
+    }
+
+    fn clear_websocket_url(&mut self) {
+        self.remove("ironrdp_websocketurl");
     }
 
     /// Windows named-pipe path for RDP (e.g. Windows Sandbox `\\.\pipe\{VMId}`).
